@@ -1,0 +1,202 @@
+services:
+  database:
+    image: mysql:8.0
+    environment:
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+      - TZ=Europe/Moscow
+    volumes:
+      - database_data:/var/lib/mysql
+    networks:
+      - testo-app-network
+
+  php-fpm:
+    image: ghcr.io/v1t3/v1t3/testo-core:master
+    depends_on:
+      database:
+        condition: service_started
+      redis:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      - APP_ENV=${APP_ENV}
+      - APP_SECRET=${APP_SECRET}
+      - DATABASE_URL=mysql://${MYSQL_USER}:${MYSQL_PASSWORD}@database:3306/${MYSQL_DATABASE}?serverVersion=8.0
+      - JWT_SECRET=${JWT_SECRET}
+      - GRAYLOG_HOST=${GRAYLOG_HOST}
+      - GRAYLOG_PORT=${GRAYLOG_PORT}
+      - MESSENGER_TRANSPORT_DSN=${MESSENGER_TRANSPORT_DSN}
+      - TZ=Europe/Moscow
+    volumes:
+      - app_data:/var/www/
+    networks:
+      - testo-app-network
+
+  php-worker:
+    image: ghcr.io/v1t3/v1t3/testo-core:master
+    depends_on:
+      database:
+        condition: service_started
+      redis:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+    command: php bin/console messenger:consume async --verbose
+    restart: always
+    environment:
+      - APP_ENV=${APP_ENV}
+      - APP_SECRET=${APP_SECRET}
+      - DATABASE_URL=mysql://${MYSQL_USER}:${MYSQL_PASSWORD}@database:3306/${MYSQL_DATABASE}?serverVersion=8.0
+      - JWT_SECRET=${JWT_SECRET}
+      - GRAYLOG_HOST=${GRAYLOG_HOST}
+      - GRAYLOG_PORT=${GRAYLOG_PORT}
+      - MESSENGER_TRANSPORT_DSN=${MESSENGER_TRANSPORT_DSN}
+      - TZ=Europe/Moscow
+    volumes:
+      - app_data:/var/www/
+    networks:
+      - testo-app-network
+
+  tg-bot:
+    image: ghcr.io/v1t3/v1t3/testo-tg-bot:master
+    command: php bin/console app:telegram-bot --verbose
+    environment:
+      - TG_APP_ENV=${APP_ENV}
+      - TG_APP_SECRET=${APP_SECRET}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_WEBHOOK_URL=${TELEGRAM_WEBHOOK_URL}
+      - APP_BASE_URL=${APP_BASE_URL}
+      - API_USER=${API_USER}
+      - API_PASSWORD=${API_PASSWORD}
+      - TZ=Europe/Moscow
+    volumes:
+      - app_data:/var/www/
+    networks:
+      - testo-app-network
+
+  nginx:
+    image: ghcr.io/v1t3/v1t3/testo-nginx-proxy:master
+    depends_on:
+      - php-fpm
+      - tg-bot
+    restart: always
+    command: /bin/sh -c "envsubst < /etc/nginx/upstream.template.conf > /etc/nginx/conf.d/default.conf && nginx"
+    environment:
+      - APP_HOST=php-fpm
+    volumes:
+      - app_data:/var/www/
+    networks:
+      - testo-app-network
+    ports:
+      - "80:80"
+      - "443:443"
+
+  redis:
+    image: redis:latest
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    networks:
+      - testo-app-network
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    restart: unless-stopped
+    environment:
+      - RABBITMQ_DEFAULT_USER=${RABBITMQ_DEFAULT_USER}
+      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_DEFAULT_PASS}
+      - MESSENGER_TRANSPORT_DSN=${MESSENGER_TRANSPORT_DSN}
+      - TZ=Europe/Moscow
+    networks:
+      - testo-app-network
+    healthcheck:
+      test: [ "CMD", "rabbitmq-diagnostics", "-q", "check_running" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+#  mongodb:
+#    image: mongo:6.0
+#    restart: unless-stopped
+#    environment:
+#      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-admin}
+#      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-admin123}
+#    volumes:
+#      - mongodb_data:/data/db
+#    networks:
+#      - testo-app-network
+#    healthcheck:
+#      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+#      interval: 10s
+#      timeout: 5s
+#      retries: 5
+#      start_period: 30s
+#
+#  opensearch:
+#    image: opensearchproject/opensearch:2.11.0
+#    restart: unless-stopped
+#    environment:
+#      - discovery.type=single-node
+#      - plugins.security.ssl.http.enabled=false
+#      - plugins.security.disabled=true
+#      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+#      - bootstrap.memory_lock=true
+#      - TZ=Europe/Moscow
+#    volumes:
+#      - opensearch_data:/usr/share/opensearch/data
+#    networks:
+#      - testo-app-network
+#    healthcheck:
+#      test: ["CMD-SHELL", "curl -f http://127.0.0.1:9200/_cluster/health || exit 1"]
+#      interval: 30s
+#      timeout: 10s
+#      retries: 5
+#      start_period: 60s
+#
+#  graylog:
+#    image: graylog/graylog:6.3
+#    restart: unless-stopped
+#    depends_on:
+#      mongodb:
+#        condition: service_started
+#      opensearch:
+#        condition: service_started
+#    entrypoint: "/usr/bin/tini -- wait-for-it opensearch:9200 --  /docker-entrypoint.sh"
+#    environment:
+#      - GRAYLOG_PASSWORD_SECRET=${GRAYLOG_PASSWORD_SECRET:-somepasswordpepper}
+#      - GRAYLOG_ROOT_PASSWORD_SHA2=${GRAYLOG_ROOT_PASSWORD_SHA2:-8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918}
+#      - GRAYLOG_HTTP_EXTERNAL_URI=${GRAYLOG_EXTERNAL_URL:-http://localhost:4080/graylog/}
+#      - GRAYLOG_ELASTICSEARCH_HOSTS=http://opensearch:9200
+#      - GRAYLOG_MONGODB_URI=mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-admin123}@mongodb:27017/graylog?authSource=admin
+#        # To make reporting (headless_shell) work inside a Docker container
+#      - GRAYLOG_REPORT_DISABLE_SANDBOX=true
+#      - TZ=Europe/Moscow
+#    volumes:
+#      - graylog_data:/usr/share/graylog/data
+#    networks:
+#      - testo-app-network
+#    healthcheck:
+#      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/api/system/lbstatus"]
+#      interval: 30s
+#      timeout: 10s
+#      retries: 5
+#      start_period: 60s
+
+volumes:
+  database_data:
+  app_data:
+  redis_data:
+  rabbitmq_data:
+  mongodb_data:
+  opensearch_data:
+  graylog_data:
+
+networks:
+  testo-app-network:
+    name: testo-app-network
+    driver: bridge
